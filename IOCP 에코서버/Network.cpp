@@ -11,8 +11,6 @@
 
 #define EXIT_THREAD_CODE	
 
-typedef UINT64 SESSIONID;
-
 struct WsaOverlappedEX
 {
 	WSAOVERLAPPED overlapped;
@@ -30,11 +28,6 @@ struct Session
 	RingBuffer recvRingBuffer;
 	int overlappedIOCnt;
 	int waitSend;
-	WSABUF wsaSendBuf[2];
-	int wsaSendBufLen;
-	char* ptrRecvWhenSend;
-	int recvDirectDequeuSizeWhenSend;
-	int sendPosFlag;
 
 	Session(SOCKET sock, SOCKADDR_IN* addr, SESSIONID id)
 	: socket(sock)
@@ -44,10 +37,6 @@ struct Session
 	, recvRingBuffer(1048576)
 	, overlappedIOCnt(0)
 	, waitSend(false)
-	, wsaSendBuf{ 0, }
-	, recvDirectDequeuSizeWhenSend(0)
-	, sendPosFlag(-1)
-	, ptrRecvWhenSend(nullptr)
 	{
 		sendOverlapped.ptrSession = this;
 		recvOverlapped.ptrSession = this;
@@ -109,6 +98,12 @@ void RequestExitNetworkLibThread(void)
 
 bool InitNetworkLib(WORD port)
 {
+	if (OnRecv == nullptr)
+	{
+		_Log(dfLOG_LEVEL_SYSTEM, L"OnRecv 이벤트를 등록하세요");
+		return false;
+	}
+
 	_wsetlocale(LC_ALL, L"korean");
 
 	WSADATA wsa;
@@ -208,6 +203,17 @@ bool InitNetworkIOThread(void)
 	return true;
 }
 
+Session* CreateSession(SOCKET clientSock, SOCKADDR_IN* clientAddr)
+{
+	CreateIoCompletionPort((HANDLE)clientSock, hIOCP, gSessionID, 0);
+	Session* ptrNewSession = new Session(clientSock, clientAddr, gSessionID);
+	AcquireSRWLockExclusive(&srwlock);
+	sessionMap.insert({ gSessionID, ptrNewSession });
+	ReleaseSRWLockExclusive(&srwlock);
+	gSessionID += 1;
+	return ptrNewSession;
+}
+
 void ReleaseSession(Session* ptrSession)
 {
 	//세션 삭제
@@ -249,7 +255,10 @@ void PostRecv(Session* ptrSession)
 		&& (wsaRecvErrorCode = WSAGetLastError()) != WSA_IO_PENDING)
 	{
 		_Log(dfLOG_LEVEL_SYSTEM, "WSARecv error code: %d", wsaRecvErrorCode);
-		InterlockedDecrement((LONG*)&ptrSession->overlappedIOCnt);
+		if (InterlockedDecrement((LONG*)&ptrSession->overlappedIOCnt) == 0)
+		{
+			ReleaseSession(ptrSession);
+		}
 	}
 }
 
@@ -289,7 +298,18 @@ void PostSend(Session* ptrSession)
 
 void SendPacket(SESSIONID sessionID, SerializationBuffer& sendPacket)
 {
-
+	Session* ptrSession = sessionMap.find(sessionID)->second;
+	Session* ptrSession2 = sessionMap.find(sessionID)->second;
+	if (ptrSession == nullptr)
+	{
+		printf("ptrSession is null\n");
+		return;
+	}
+	WORD sendPacketHeader = sendPacket.GetUseSize();
+	ptrSession->sendRingBuffer.Enqueue((char*)&sendPacketHeader, sizeof(sendPacketHeader));
+	ptrSession->sendRingBuffer.Enqueue(sendPacket.GetFrontBufferPtr(), sendPacketHeader);
+	sendPacket.MoveFront(sendPacketHeader);
+	PostSend(ptrSession);
 }
 
 unsigned WINAPI AcceptThread(LPVOID args)
@@ -319,29 +339,21 @@ unsigned WINAPI AcceptThread(LPVOID args)
 			continue;
 		}
 
-		CreateIoCompletionPort((HANDLE)clientSock, hIOCP, gSessionID, 0);
-		Session* ptrNewSession = new Session(clientSock, &clientAddr, gSessionID);
-		AcquireSRWLockExclusive(&srwlock);
-		sessionMap.insert({ gSessionID, ptrNewSession });
-		ReleaseSRWLockExclusive(&srwlock);
-		gSessionID += 1;
-
-		WSABUF recvWsaBuf;
+		PostRecv(CreateSession(clientSock, &clientAddr));
+		/*WSABUF recvWsaBuf;
 		recvWsaBuf.buf = ptrNewSession->recvRingBuffer.GetRearBufferPtr();
 		recvWsaBuf.len = ptrNewSession->recvRingBuffer.GetDirectEnqueueSize();
 		ZeroMemory(&ptrNewSession->recvOverlapped, sizeof(WSAOVERLAPPED));
 		InterlockedIncrement((LONG*)&(ptrNewSession->overlappedIOCnt));
-		retval = WSARecv(ptrNewSession->socket, &recvWsaBuf, 1, nullptr, &flags, (LPWSAOVERLAPPED)&ptrNewSession->recvOverlapped, nullptr);
-		if (retval == SOCKET_ERROR)
+		if (WSARecv(clientSock, &recvWsaBuf, 1, nullptr, &flags
+			, (LPWSAOVERLAPPED)&ptrNewSession->recvOverlapped, nullptr) == SOCKET_ERROR
+			&& (errorCode = WSAGetLastError()) != WSA_IO_PENDING)
 		{
-			errorCode = WSAGetLastError();
-			if (errorCode != WSA_IO_PENDING)
+			if (InterlockedDecrement((LONG*)&(ptrNewSession->overlappedIOCnt)) == 0)
 			{
-				closesocket(clientSock);
-				delete ptrNewSession;
-				continue;
+				ReleaseSession(ptrNewSession);
 			}
-		}
+		}*/
 	}
 }
 
@@ -353,6 +365,8 @@ unsigned WINAPI IOCPWorkerThread(LPVOID args)
 	Session* ptrSession;
 	int retvalGQCS;
 	SerializationBuffer recvPacket;
+	WORD recvPacketHeader;
+
 	_Log(dfLOG_LEVEL_SYSTEM, "[No.%lld] IOCPWorkerThread", (_int64)args);
 	for (;;)
 	{
@@ -371,15 +385,30 @@ unsigned WINAPI IOCPWorkerThread(LPVOID args)
 		{
 			if (&(ptrSession->recvOverlapped) == overlapped)
 			{
-				recvPacket.ClearBuffer();
 				//char testbuffer[2048] = { 0, };
 				ptrSession->recvRingBuffer.MoveRear(numberOfBytesTransferred);
-				ptrSession->recvRingBuffer.Dequeue(recvPacket.GetRearBufferPtr(), numberOfBytesTransferred);
-				recvPacket.MoveRear(numberOfBytesTransferred);
-				ptrSession->sendRingBuffer.Enqueue(recvPacket.GetFrontBufferPtr(), numberOfBytesTransferred);
-				recvPacket.MoveFront(numberOfBytesTransferred);
+				for (;;)
+				{
+					if (ptrSession->recvRingBuffer.GetUseSize() <= sizeof(recvPacketHeader))
+					{
+						break;
+					}
 
-				PostSend(ptrSession);
+					ptrSession->recvRingBuffer.Peek((char*)&recvPacketHeader, sizeof(recvPacketHeader));
+					if (ptrSession->recvRingBuffer.GetUseSize() < (sizeof(recvPacketHeader) + recvPacketHeader))
+					{
+						break;
+					}
+					ptrSession->recvRingBuffer.MoveFront(sizeof(recvPacketHeader));
+					recvPacket.MoveRear(ptrSession->recvRingBuffer.Dequeue(recvPacket.GetRearBufferPtr(), recvPacketHeader));
+					OnRecv(sessionID, recvPacket);
+					recvPacket.ClearBuffer();
+				}
+				
+				//ptrSession->sendRingBuffer.Enqueue(recvPacket.GetFrontBufferPtr(), numberOfBytesTransferred);
+				//recvPacket.MoveFront(numberOfBytesTransferred);
+
+				//PostSend(ptrSession);
 				PostRecv(ptrSession);
 			}
 			else if (&(ptrSession->sendOverlapped) == overlapped)

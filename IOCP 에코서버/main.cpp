@@ -5,9 +5,20 @@
 #define SERVERPORT	6000
 
 int shutdown = false;
+
+void OnRecv(SESSIONID sessionID, SerializationBuffer& packet)
+{
+	SerializationBuffer sendPacket(8);
+	_int64 echoBody;
+	packet >> echoBody;
+	sendPacket << echoBody;
+	SendPacket(sessionID, sendPacket);
+}
+
 int main(void)
 {
 	int key;
+	SetOnRecvEvent(OnRecv);
 	if (!InitNetworkLib(SERVERPORT))
 	{
 		return 0;

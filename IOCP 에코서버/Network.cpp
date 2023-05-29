@@ -65,6 +65,7 @@ HANDLE hThreadAccept;
 HANDLE* hThreadIOCPWorker;
 std::map<SESSIONID, Session*> sessionMap;
 SRWLOCK	srwlock = RTL_SRWLOCK_INIT;
+static void (*OnRecv)(SESSIONID sessionID, SerializationBuffer& packet) = nullptr;
 
 void ReleaseServerResource()
 {
@@ -165,7 +166,7 @@ InitError:
 
 bool InitNetworkIOThread(void)
 {
-	DWORD idx;
+	_int64 idx;
 	GetSystemInfo(&gSystemInfo);
 	numberOfConcurrentThread = gSystemInfo.dwNumberOfProcessors / 2;
 	hIOCP = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, numberOfConcurrentThread);
@@ -205,6 +206,90 @@ bool InitNetworkIOThread(void)
 	}
 
 	return true;
+}
+
+void ReleaseSession(Session* ptrSession)
+{
+	//세션 삭제
+	closesocket(ptrSession->socket);
+	AcquireSRWLockExclusive(&srwlock);
+	sessionMap.erase(ptrSession->sessionID);
+	ReleaseSRWLockExclusive(&srwlock);
+	delete ptrSession;
+}
+
+void SetOnRecvEvent(void (*_OnRecv)(SESSIONID sessionID, SerializationBuffer& packet))
+{
+	OnRecv = _OnRecv;
+}
+
+void PostRecv(Session* ptrSession)
+{
+	RingBuffer* ptrRecvRingBuffer = &ptrSession->recvRingBuffer;
+	WSABUF wsabuf[2];
+	int wsabufCnt = 1;
+	int recvRingBufferFreeSize;
+	DWORD flag = 0;
+	int wsaRecvErrorCode;
+
+	wsabuf[0].buf = ptrRecvRingBuffer->GetRearBufferPtr();
+	wsabuf[0].len = ptrRecvRingBuffer->GetDirectEnqueueSize();
+	recvRingBufferFreeSize = ptrRecvRingBuffer->GetFreeSize();
+	if (recvRingBufferFreeSize > (int)wsabuf[0].len)
+	{
+		wsabuf[1].buf = ptrRecvRingBuffer->GetInternalBufferPtr();
+		wsabuf[1].len = recvRingBufferFreeSize - (int)wsabuf[0].len;
+		++wsabufCnt;
+	}
+
+	ZeroMemory(&ptrSession->recvOverlapped, sizeof(WSAOVERLAPPED));
+	InterlockedIncrement((LONG*)&ptrSession->overlappedIOCnt);
+	if (WSARecv(ptrSession->socket, wsabuf, wsabufCnt, nullptr, &flag
+		, (LPWSAOVERLAPPED)&ptrSession->recvOverlapped, nullptr) == SOCKET_ERROR
+		&& (wsaRecvErrorCode = WSAGetLastError()) != WSA_IO_PENDING)
+	{
+		_Log(dfLOG_LEVEL_SYSTEM, "WSARecv error code: %d", wsaRecvErrorCode);
+		InterlockedDecrement((LONG*)&ptrSession->overlappedIOCnt);
+	}
+}
+
+void PostSend(Session* ptrSession)
+{
+	RingBuffer* ptrSendRingBuffer = &ptrSession->sendRingBuffer;
+	WSABUF wsabuf[2];
+	int wsabufCnt;
+	int sendRingBufferUseSize;
+	int wsaSendErrorCode;
+
+	if (InterlockedExchange((LONG*)&ptrSession->waitSend, true))
+	{
+		return;
+	}
+
+	wsabufCnt = 1;
+	wsabuf[0].buf = ptrSendRingBuffer->GetFrontBufferPtr();
+	wsabuf[0].len = ptrSendRingBuffer->GetDirectDequeueSize();
+	sendRingBufferUseSize = ptrSendRingBuffer->GetUseSize();
+	if (sendRingBufferUseSize > (int)wsabuf[0].len)
+	{
+		wsabuf[1].buf = ptrSendRingBuffer->GetInternalBufferPtr();
+		wsabuf[1].len = sendRingBufferUseSize - (int)wsabuf[0].len;
+		++wsabufCnt;
+	}
+	ZeroMemory(&ptrSession->sendOverlapped, sizeof(WSAOVERLAPPED));
+	InterlockedIncrement((LONG*)&ptrSession->overlappedIOCnt);
+	if (WSASend(ptrSession->socket, wsabuf, wsabufCnt, nullptr, 0
+		, (LPWSAOVERLAPPED)&ptrSession->sendOverlapped, nullptr) == SOCKET_ERROR
+		&& (wsaSendErrorCode = WSAGetLastError()) != WSA_IO_PENDING)
+	{
+		_Log(dfLOG_LEVEL_SYSTEM, "WSASend error code: %d", wsaSendErrorCode);
+		InterlockedDecrement((LONG*)&ptrSession->overlappedIOCnt);
+	}
+}
+
+void SendPacket(SESSIONID sessionID, SerializationBuffer& sendPacket)
+{
+
 }
 
 unsigned WINAPI AcceptThread(LPVOID args)
@@ -274,7 +359,7 @@ unsigned WINAPI IOCPWorkerThread(LPVOID args)
 	DWORD flag;
 	int wsaRecvErrorCode;
 	int wsaSendErrorCode;
-	_Log(dfLOG_LEVEL_SYSTEM, "[No.%d] IOCPWorkerThread", (int)args);
+	_Log(dfLOG_LEVEL_SYSTEM, "[No.%lld] IOCPWorkerThread", (_int64)args);
 	for (;;)
 	{
 		wsaRecvBufLen = 1;
@@ -285,7 +370,7 @@ unsigned WINAPI IOCPWorkerThread(LPVOID args)
 		retvalGQCS = GetQueuedCompletionStatus(hIOCP, &numberOfBytesTransferred, &sessionID, (LPOVERLAPPED*)&overlapped, INFINITE);
 		if (numberOfBytesTransferred == 0 && sessionID == 0 && overlapped == nullptr)
 		{
-			_Log(dfLOG_LEVEL_SYSTEM, "[No.%d] IOCPWorkerThread Exit", (int)args);
+			_Log(dfLOG_LEVEL_SYSTEM, "[No.%lld] IOCPWorkerThread Exit", (_int64)args);
 			return 0;
 		}
 
@@ -299,7 +384,8 @@ unsigned WINAPI IOCPWorkerThread(LPVOID args)
 				ptrSession->recvRingBuffer.Dequeue(testbuffer, numberOfBytesTransferred);
 				ptrSession->sendRingBuffer.Enqueue(testbuffer, numberOfBytesTransferred);
 
-				if (!InterlockedExchange((LONG*)&ptrSession->waitSend, true))
+				PostSend(ptrSession);
+				/*if (!InterlockedExchange((LONG*)&ptrSession->waitSend, true))
 				{
 					ptrSession->wsaSendBufLen = 1;
 					ptrSession->wsaSendBuf[0].buf = ptrSession->sendRingBuffer.GetFrontBufferPtr();
@@ -318,9 +404,9 @@ unsigned WINAPI IOCPWorkerThread(LPVOID args)
 						_Log(dfLOG_LEVEL_SYSTEM, "WSASend error code: %d", wsaSendErrorCode);
 						InterlockedDecrement((LONG*)&ptrSession->overlappedIOCnt);
 					}
-				}
+				}*/
 					
-				flag = 0;
+				/*flag = 0;
 				wsaBuf[0].buf = ptrSession->recvRingBuffer.GetRearBufferPtr();
 				wsaBuf[0].len = ptrSession->recvRingBuffer.GetDirectEnqueueSize();
 				if (ptrSession->recvRingBuffer.GetFreeSize() > (int)wsaBuf[0].len)
@@ -337,7 +423,8 @@ unsigned WINAPI IOCPWorkerThread(LPVOID args)
 				{
 					_Log(dfLOG_LEVEL_SYSTEM, "WSARecv error code: %d", wsaRecvErrorCode);
 					InterlockedDecrement((LONG*)&ptrSession->overlappedIOCnt);
-				}
+				}*/
+				PostRecv(ptrSession);
 			}
 			else if (&(ptrSession->sendOverlapped) == overlapped)
 			{
@@ -345,7 +432,9 @@ unsigned WINAPI IOCPWorkerThread(LPVOID args)
 				InterlockedExchange((LONG*)&ptrSession->waitSend, false);
 				if (ptrSession->sendRingBuffer.GetUseSize() > 0)
 				{
-					if (!InterlockedExchange((LONG*)&ptrSession->waitSend, true))
+					PostSend(ptrSession);
+
+					/*if (!InterlockedExchange((LONG*)&ptrSession->waitSend, true))
 					{
 						ptrSession->wsaSendBufLen = 1;
 						ptrSession->wsaSendBuf[0].buf = ptrSession->sendRingBuffer.GetFrontBufferPtr();
@@ -364,20 +453,20 @@ unsigned WINAPI IOCPWorkerThread(LPVOID args)
 							_Log(dfLOG_LEVEL_SYSTEM, "WSASend error code: %d", wsaSendErrorCode);
 							InterlockedDecrement((LONG*)&ptrSession->overlappedIOCnt);
 						}
-					}
+					}*/
 				}
-
 			}
 		}
 
 		if (InterlockedDecrement((LONG*)&ptrSession->overlappedIOCnt) == 0)
 		{
 			//세션 삭제
-			closesocket(ptrSession->socket);
-			AcquireSRWLockExclusive(&srwlock);
-			sessionMap.erase(sessionID);
-			ReleaseSRWLockExclusive(&srwlock);
-			delete ptrSession;
+			ReleaseSession(ptrSession);
+			//closesocket(ptrSession->socket);
+			//AcquireSRWLockExclusive(&srwlock);
+			//sessionMap.erase(sessionID);
+			//ReleaseSRWLockExclusive(&srwlock);
+			//delete ptrSession;
 		}
 	}
 }

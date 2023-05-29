@@ -131,11 +131,13 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="Network.cpp" />
     <ClCompile Include="RingBuffer.cpp" />
+    <ClCompile Include="SerializationBuffer.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Log.h" />
     <ClInclude Include="Network.h" />
     <ClInclude Include="RingBuffer.h" />
+    <ClInclude Include="SerializationBuffer.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

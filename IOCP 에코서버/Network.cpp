@@ -5,6 +5,7 @@
 #include <ws2tcpip.h>
 #include <process.h>
 #include "RingBuffer.h"
+#include "SerializationBuffer.h"
 #include <map>
 #include <locale.h>
 
@@ -293,34 +294,16 @@ unsigned WINAPI IOCPWorkerThread(LPVOID args)
 		{
 			if (&(ptrSession->recvOverlapped) == overlapped)
 			{
-				ptrSession->recvRingBuffer.MoveRear(numberOfBytesTransferred);
-				//char recvdata[10];
-				//int a = ptrSession->recvRingBuffer.Peek(recvdata, numberOfBytesTransferred);
-
-				//if (*((__int64*)(recvdata + 2)) == 144123984168982939)
-				//{
-				//	printf("sendRingBuffer MoveFront %lld, %d\n", *((__int64*)(recvdata + 2)), a);
-				//}
-
-				char* ptrRecvFront = ptrSession->recvRingBuffer.GetFrontBufferPtr();
-				int recvDirectDequeuSizeWhenSend = ptrSession->recvRingBuffer.GetDirectDequeueSize();
-
 				char testbuffer[2048] = { 0, };
+				ptrSession->recvRingBuffer.MoveRear(numberOfBytesTransferred);
 				ptrSession->recvRingBuffer.Dequeue(testbuffer, numberOfBytesTransferred);
 				ptrSession->sendRingBuffer.Enqueue(testbuffer, numberOfBytesTransferred);
 
 				if (!InterlockedExchange((LONG*)&ptrSession->waitSend, true))
 				{
-					ptrSession->ptrRecvWhenSend = ptrRecvFront;
-					ptrSession->recvDirectDequeuSizeWhenSend = recvDirectDequeuSizeWhenSend;
-					ptrSession->sendPosFlag = 1;
 					ptrSession->wsaSendBufLen = 1;
 					ptrSession->wsaSendBuf[0].buf = ptrSession->sendRingBuffer.GetFrontBufferPtr();
 					ptrSession->wsaSendBuf[0].len = ptrSession->sendRingBuffer.GetDirectDequeueSize();
-					//if (ptrSession->wsaSendBuf[0].len > 10)
-					//{
-					//	printf("1test %d\n", wsaBuf[0].len);
-					//}
 					if (ptrSession->sendRingBuffer.GetUseSize() > (int)ptrSession->wsaSendBuf[0].len)
 					{
 						ptrSession->wsaSendBuf[1].buf = ptrSession->sendRingBuffer.GetInternalBufferPtr();
@@ -358,39 +341,15 @@ unsigned WINAPI IOCPWorkerThread(LPVOID args)
 			}
 			else if (&(ptrSession->sendOverlapped) == overlapped)
 			{
-				//char senddata[10];
-				char* ptrBuffer = ptrSession->sendRingBuffer.GetInternalBufferPtr();
-				char* ptrFront = ptrSession->sendRingBuffer.GetFrontBufferPtr();
-				char* ptrRear = ptrSession->sendRingBuffer.GetRearBufferPtr();
-				int useSize = ptrSession->sendRingBuffer.GetUseSize();
-				int freeSize = ptrSession->sendRingBuffer.GetFreeSize();
-				int directDequeueSize = ptrSession->sendRingBuffer.GetDirectDequeueSize();
-				int directEnqueueSize = ptrSession->sendRingBuffer.GetDirectEnqueueSize();
 				ptrSession->sendRingBuffer.MoveFront(numberOfBytesTransferred);
-				//int a = ptrSession->sendRingBuffer.Dequeue(senddata, numberOfBytesTransferred);
-				//if (*((__int64*)(senddata + 2)) == 144123984168982939)
-				//{
-				//	printf("sendRingBuffer MoveFront %lld, %d\n", *((__int64*)(senddata + 2)), a);
-				//}
-				//if (ptrSession->sendRingBuffer.MoveFront(numberOfBytesTransferred) != 10)
-				//{
-					//printf("sendRingBuffer MoveFront %lld\n", *((__int64*)(senddata + 2)));
-				//}
 				InterlockedExchange((LONG*)&ptrSession->waitSend, false);
 				if (ptrSession->sendRingBuffer.GetUseSize() > 0)
 				{
 					if (!InterlockedExchange((LONG*)&ptrSession->waitSend, true))
 					{
-						ptrSession->recvDirectDequeuSizeWhenSend = -1;
-						ptrSession->ptrRecvWhenSend = (char*)0x8123;
-						ptrSession->sendPosFlag = 2;
 						ptrSession->wsaSendBufLen = 1;
 						ptrSession->wsaSendBuf[0].buf = ptrSession->sendRingBuffer.GetFrontBufferPtr();
 						ptrSession->wsaSendBuf[0].len = ptrSession->sendRingBuffer.GetDirectDequeueSize();
-						//if (ptrSession->wsaSendBuf[0].len > 10)
-						//{
-						//	printf("2test %d\n", ptrSession->wsaSendBuf[0].len);
-						//}
 						if (ptrSession->sendRingBuffer.GetUseSize() > (int)ptrSession->wsaSendBuf[0].len)
 						{
 							ptrSession->wsaSendBuf[1].buf = ptrSession->sendRingBuffer.GetInternalBufferPtr();

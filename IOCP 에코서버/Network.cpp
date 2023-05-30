@@ -264,27 +264,66 @@ void PostRecv(Session* ptrSession)
 
 void PostSend(Session* ptrSession)
 {
-	RingBuffer* ptrSendRingBuffer = &ptrSession->sendRingBuffer;
-	WSABUF wsabuf[2];
-	int wsabufCnt;
-	int sendRingBufferUseSize;
-	int wsaSendErrorCode;
-
 	if (InterlockedExchange((LONG*)&ptrSession->waitSend, true))
 	{
 		return;
 	}
 
-	wsabufCnt = 1;
+	RingBuffer* ptrSendRingBuffer = &ptrSession->sendRingBuffer;
+	WSABUF wsabuf[2];
+	int wsabufCnt;
+	int wsaSendErrorCode;
+	char* ptrRear;
+	_int64 distanceOfRearToFront;
+	
+	/*************************************
+	** PostSend가 호출되는 2가지 경로
+	* 1. 수신 IO 처리시에 OnRecv 함수 안에서 SendPacket 호출한 경우, 호출될 수 있음
+	* 2. 송신 완료 처리후에 버퍼에 남은 데이터가 있다면 호출될 수 있음
+	* 
+	* 1번 경로로 PostSend 실행의 경우, 송신 완료 처리 스레드가 Interlock으로 잠금을 풀어주지 않으면,
+	*     수신 IO에서 PostSend 호출이 불가능하다. WSASend를 실행할 수 없다.
+	*     그래서 송신 완료 결과가 캐시에 반영아 안됬다가
+	*	  , PostSend 로직 실행중에 반영이 될지말지 여부로 고민할 필요없다. 
+		  Interlock API가 store buffer의 내용을 무조건 캐시에 반영 시키기 때문이다. 무조건 반영되어 있다.
+	* 2번 경로로 PostSend가 실행된 경우, 수신 완료 IO 처리 스레드에서, 송신 링버퍼에 인큐를 동시에 할 수 있는
+	*     상황이 발생한다.
+	*     PostSend 로직이 도는 순간에도 Dequeue 가능한 크기가 가변적으로 계속 증가할 수 있다는 것이다.
+	*     그로 인해 WSASend에 호출시 WSABUF 배열의 2번재 인자의 버퍼주소랑 길이를 잘못 넘겨주면
+	*     잘못된 데이터를 전송하게 되는 오류가 발생할 수 있다.
+	* 
+	*     그래서 Front랑 Rear 포인터 값을 가져와서 로직에서, Front와 Rear 사이의 거리를 직접 계산해서
+	*     WSABUF에 넘겨줄 값들을 특정하도록 하였다.
+	*     Front 포인터는 PostSend로직이 도는 중에 변경될 걱정이 없고
+	*     Rear 포인터는 충분히 위치가 바뀔수 있기 때문에,
+	*     Front를 기준으로 Rear의 위치가 어디에 있는지만 파악하면
+	*     아무리 Rear가 계속 바뀌고 있다고 하더라도 아래와 같은 로직으로 문제없이
+	*	  정확한 데이터를 송신할 수 있다.
+	**************************************/
 	wsabuf[0].buf = ptrSendRingBuffer->GetFrontBufferPtr();
-	wsabuf[0].len = ptrSendRingBuffer->GetDirectDequeueSize();
-	sendRingBufferUseSize = ptrSendRingBuffer->GetUseSize();
-	if (sendRingBufferUseSize > (int)wsabuf[0].len)
+
+	ptrRear = ptrSendRingBuffer->GetRearBufferPtr();
+	distanceOfRearToFront = (ptrRear - wsabuf[0].buf);
+
+	if (distanceOfRearToFront > 0)
 	{
-		wsabuf[1].buf = ptrSendRingBuffer->GetInternalBufferPtr();
-		wsabuf[1].len = sendRingBufferUseSize - (int)wsabuf[0].len;
-		++wsabufCnt;
+		wsabuf[0].len = ptrSendRingBuffer->GetDirectDequeueSize();
+		wsabufCnt = 1;
 	}
+	else if (distanceOfRearToFront < 0)
+	{
+		wsabuf[0].len = ptrSendRingBuffer->GetDirectDequeueSize();
+
+		wsabuf[1].buf = ptrSendRingBuffer->GetInternalBufferPtr();
+		wsabuf[1].len = (ULONG)(ptrSendRingBuffer->GetRearBufferPtr() - wsabuf[1].buf);
+		wsabufCnt = 2;
+	}
+	else
+	{
+		InterlockedExchange((LONG*)&ptrSession->waitSend, false);
+		return;
+	}
+
 	ZeroMemory(&ptrSession->sendOverlapped, sizeof(WSAOVERLAPPED));
 	InterlockedIncrement((LONG*)&ptrSession->overlappedIOCnt);
 	if (WSASend(ptrSession->socket, wsabuf, wsabufCnt, nullptr, 0

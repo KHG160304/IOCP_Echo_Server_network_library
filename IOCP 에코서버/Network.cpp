@@ -368,8 +368,6 @@ void SendPacket(SESSIONID sessionID, SerializationBuffer& sendPacket)
 
 unsigned WINAPI AcceptThread(LPVOID args)
 {
-	int retval;
-	int errorCode;
 	int acceptErrorCode;
 	DWORD flags = 0;
 	SOCKET clientSock;
@@ -394,20 +392,6 @@ unsigned WINAPI AcceptThread(LPVOID args)
 		}
 
 		PostRecv(CreateSession(clientSock, &clientAddr));
-		/*WSABUF recvWsaBuf;
-		recvWsaBuf.buf = ptrNewSession->recvRingBuffer.GetRearBufferPtr();
-		recvWsaBuf.len = ptrNewSession->recvRingBuffer.GetDirectEnqueueSize();
-		ZeroMemory(&ptrNewSession->recvOverlapped, sizeof(WSAOVERLAPPED));
-		InterlockedIncrement((LONG*)&(ptrNewSession->overlappedIOCnt));
-		if (WSARecv(clientSock, &recvWsaBuf, 1, nullptr, &flags
-			, (LPWSAOVERLAPPED)&ptrNewSession->recvOverlapped, nullptr) == SOCKET_ERROR
-			&& (errorCode = WSAGetLastError()) != WSA_IO_PENDING)
-		{
-			if (InterlockedDecrement((LONG*)&(ptrNewSession->overlappedIOCnt)) == 0)
-			{
-				ReleaseSession(ptrNewSession);
-			}
-		}*/
 	}
 }
 

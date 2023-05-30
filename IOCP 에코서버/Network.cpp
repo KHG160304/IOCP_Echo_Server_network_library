@@ -401,6 +401,7 @@ unsigned WINAPI IOCPWorkerThread(LPVOID args)
 	SESSIONID sessionID = 0;
 	WsaOverlappedEX* overlapped = 0;
 	Session* ptrSession;
+	RingBuffer* ptrRecvRingBuffer;
 	int retvalGQCS;
 	SerializationBuffer recvPacket;
 	WORD recvPacketHeader;
@@ -419,47 +420,78 @@ unsigned WINAPI IOCPWorkerThread(LPVOID args)
 		}
 
 		ptrSession = (Session*)overlapped->ptrSession;
-		if (retvalGQCS == TRUE && numberOfBytesTransferred != 0)
+		if (retvalGQCS == FALSE)
 		{
-			if (&(ptrSession->recvOverlapped) == overlapped)
+			goto FIN_COMPLETION_IO_PROCESS;
+		}
+		/*
+		
+			SendRingBuffer의 경우
+			수신 IO를 처리하는 스레드와
+			송신 IO를 처리하는 스레드가 동시에 접근이 가능하다.
+
+			수신 IO 스레드가
+			OnRecv 함수에서 SendPacket 함수를 호출하여
+			SendRingBuffer에 Enqueue할때 버퍼에 공간이 부족하면
+			데이터가 안들어간다. 
+			그리고 송신 완료 IO 스레드가 돌면서, 송신한 만큼
+			링버퍼 크기를 줄이면서, 송신 링버퍼에 들어있는 값 메모리 크기가 0이 될 수 있다.
+			그러면
+
+			이 경우는 송신 링버퍼의 크기가 충분하지 않아서 발생한 문제 이다.
+			송신 링버퍼의 크기를 충분하게 늘려 주자..
+		*/
+		if ((&(ptrSession->recvOverlapped) == overlapped))
+		{
+			/*
+				여기서 0 을 체크하는 이유는 
+				송신 완료 IO작업인 경우는 waitSend 플래그 값을 false로 바꿔줘야 해서
+				송신 완료 IO는 numberOfBytesTransferred 값이 0이어도 정상적으로 로직을 타야하고
+				수신 완료 IO의 경우에만 numberOfBytesTransferred 값이 0이 아니여야만 로직을 타도록 해야해서
+				그렇다.
+			*/
+			if (numberOfBytesTransferred == 0)
 			{
-				//char testbuffer[2048] = { 0, };
-				ptrSession->recvRingBuffer.MoveRear(numberOfBytesTransferred);
-				for (;;)
-				{
-					if (ptrSession->recvRingBuffer.GetUseSize() <= sizeof(recvPacketHeader))
-					{
-						break;
-					}
-
-					ptrSession->recvRingBuffer.Peek((char*)&recvPacketHeader, sizeof(recvPacketHeader));
-					if (ptrSession->recvRingBuffer.GetUseSize() < (sizeof(recvPacketHeader) + recvPacketHeader))
-					{
-						break;
-					}
-					ptrSession->recvRingBuffer.MoveFront(sizeof(recvPacketHeader));
-					recvPacket.MoveRear(ptrSession->recvRingBuffer.Dequeue(recvPacket.GetRearBufferPtr(), recvPacketHeader));
-					OnRecv(sessionID, recvPacket);
-					recvPacket.ClearBuffer();
-				}
-				
-				//ptrSession->sendRingBuffer.Enqueue(recvPacket.GetFrontBufferPtr(), numberOfBytesTransferred);
-				//recvPacket.MoveFront(numberOfBytesTransferred);
-
-				//PostSend(ptrSession);
-				PostRecv(ptrSession);
+				goto FIN_COMPLETION_IO_PROCESS;
 			}
-			else if (&(ptrSession->sendOverlapped) == overlapped)
+
+			ptrRecvRingBuffer = &ptrSession->recvRingBuffer;
+			ptrRecvRingBuffer->MoveRear(numberOfBytesTransferred);
+			for (;;)
 			{
-				ptrSession->sendRingBuffer.MoveFront(numberOfBytesTransferred);
-				InterlockedExchange((LONG*)&ptrSession->waitSend, false);
-				if (ptrSession->sendRingBuffer.GetUseSize() > 0)
+				//  이시점에 clear 필요 언제 break 해서 빠져 나갈지 모르기때문에
+				recvPacket.ClearBuffer();
+				if (ptrRecvRingBuffer->GetUseSize() <= sizeof(recvPacketHeader))
 				{
-					PostSend(ptrSession);
+					break;
 				}
+
+				ptrRecvRingBuffer->Peek((char*)&recvPacketHeader, sizeof(recvPacketHeader));
+				if (ptrRecvRingBuffer->GetUseSize() < (sizeof(recvPacketHeader) + recvPacketHeader))
+				{
+					break;
+				}
+				ptrRecvRingBuffer->MoveFront(sizeof(recvPacketHeader));
+				ptrRecvRingBuffer->Dequeue(recvPacket.GetRearBufferPtr(), recvPacketHeader);
+				recvPacket.MoveRear(recvPacketHeader);
+					
+				OnRecv(sessionID, recvPacket);
+			}
+			PostRecv(ptrSession);
+		}
+		else if (&(ptrSession->sendOverlapped) == overlapped)
+		{
+			ptrSession->sendRingBuffer.MoveFront(numberOfBytesTransferred);
+			// InterLocked 함수 호출로 인해서, MoveFront의 결과가 확실하게
+			// CPU 캐시라인에 반영되기를 기대한다.
+			InterlockedExchange((LONG*)&ptrSession->waitSend, false);
+			if (ptrSession->sendRingBuffer.GetUseSize() > 0)
+			{
+				PostSend(ptrSession);
 			}
 		}
 
+		FIN_COMPLETION_IO_PROCESS:
 		if (InterlockedDecrement((LONG*)&ptrSession->overlappedIOCnt) == 0)
 		{
 			//세션 삭제

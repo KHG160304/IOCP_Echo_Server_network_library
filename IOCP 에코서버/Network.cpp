@@ -337,16 +337,31 @@ void PostSend(Session* ptrSession)
 
 void SendPacket(SESSIONID sessionID, SerializationBuffer& sendPacket)
 {
-	Session* ptrSession = sessionMap.find(sessionID)->second;
-	Session* ptrSession2 = sessionMap.find(sessionID)->second;
-	if (ptrSession == nullptr)
+	Session* ptrSession;
+	RingBuffer* ptrSendRingBuffer;
+	WORD sendPacketHeader;
+
+	AcquireSRWLockShared(&srwlock);
+	ptrSession = sessionMap.at(sessionID);
+	ReleaseSRWLockShared(&srwlock);
+
+	if ((sendPacketHeader = sendPacket.GetUseSize()) == 0)
 	{
-		printf("ptrSession is null\n");
+		_Log(dfLOG_LEVEL_SYSTEM, "송신패킷 SendRingBuffer Enqueue 실패 크기: %d"
+			, (int)(sizeof(sendPacketHeader) + sendPacketHeader));
 		return;
 	}
-	WORD sendPacketHeader = sendPacket.GetUseSize();
-	ptrSession->sendRingBuffer.Enqueue((char*)&sendPacketHeader, sizeof(sendPacketHeader));
-	ptrSession->sendRingBuffer.Enqueue(sendPacket.GetFrontBufferPtr(), sendPacketHeader);
+
+	ptrSendRingBuffer = &ptrSession->sendRingBuffer;
+	if (ptrSendRingBuffer->GetFreeSize() < (sizeof(sendPacketHeader) + sendPacketHeader))
+	{
+		_Log(dfLOG_LEVEL_SYSTEM, "송신패킷 SendRingBuffer Enqueue 실패 크기: %d"
+			, (int)(sizeof(sendPacketHeader) + sendPacketHeader));
+		return;
+	}
+
+	ptrSendRingBuffer->Enqueue((char*)&sendPacketHeader, sizeof(sendPacketHeader));
+	ptrSendRingBuffer->Enqueue(sendPacket.GetFrontBufferPtr(), sendPacketHeader);
 	sendPacket.MoveFront(sendPacketHeader);
 	PostSend(ptrSession);
 }

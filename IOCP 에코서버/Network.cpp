@@ -92,8 +92,18 @@ void RequestExitNetworkLibThread(void)
 	{
 		printf("RequestExitProcess - WaitForMultipleObjects error code: %d\n", GetLastError());
 	}
+
 	_Log(dfLOG_LEVEL_SYSTEM, "스레드 종료 완료");
 	ReleaseServerResource();
+
+	CloseHandle(hThreadAccept);
+	for (int i = 0; i < numberOfCreateIOCPWorkerThread; ++i)
+	{
+		CloseHandle(hThreadIOCPWorker[i]);
+	}
+	CloseHandle(hIOCP);
+	delete[] hThreadAll;
+	delete[] hThreadIOCPWorker;
 	_Log(dfLOG_LEVEL_SYSTEM, "서버 종료 처리 완료");
 }
 
@@ -199,6 +209,7 @@ bool InitNetworkIOThread(void)
 			{
 				PostQueuedCompletionStatus(hIOCP, 0, 0, nullptr);
 			}
+			CloseHandle(hIOCP);
 			return false;
 		}
 	}
@@ -212,6 +223,7 @@ bool InitNetworkIOThread(void)
 		{
 			PostQueuedCompletionStatus(hIOCP, 0, 0, nullptr);
 		}
+		CloseHandle(hIOCP);
 		return false;
 	}
 

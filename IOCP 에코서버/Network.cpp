@@ -276,6 +276,8 @@ void PostSend(Session* ptrSession)
 	int wsaSendErrorCode;
 	char* ptrRear;
 	_int64 distanceOfRearToFront;
+	//ULONG useSize;
+	//int secondDirectDequeueSize;
 	
 	/*************************************
 	** PostSend가 호출되는 2가지 경로
@@ -301,6 +303,26 @@ void PostSend(Session* ptrSession)
 	*     아무리 Rear가 계속 바뀌고 있다고 하더라도 아래와 같은 로직으로 문제없이
 	*	  정확한 데이터를 송신할 수 있다.
 	**************************************/
+	/*wsabuf[0].buf = ptrSendRingBuffer->GetFrontBufferPtr();
+	wsabuf[0].len = ptrSendRingBuffer->GetDirectDequeueSize();
+	wsabufCnt = 1;
+
+	useSize = ptrSendRingBuffer->GetUseSize();
+	if (wsabuf[0].len != useSize)
+	{
+		int secondDirectDequeueSize = ptrSendRingBuffer->GetDirectDequeueSize();
+		if (secondDirectDequeueSize > wsabuf[0].len)
+		{
+			wsabuf[0].len = ptrSendRingBuffer->GetDirectDequeueSize();
+		} 
+		else if (wsabuf[0].len == secondDirectDequeueSize)
+		{
+			wsabuf[1].buf = ptrSendRingBuffer->GetInternalBufferPtr();
+			wsabuf[1].len = ptrSendRingBuffer->GetUseSize() - secondDirectDequeueSize;
+		}
+	}*/
+
+
 	wsabuf[0].buf = ptrSendRingBuffer->GetFrontBufferPtr();
 
 	ptrRear = ptrSendRingBuffer->GetRearBufferPtr();

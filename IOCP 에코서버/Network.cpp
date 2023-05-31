@@ -164,7 +164,7 @@ bool InitNetworkIOThread(void)
 {
 	_int64 idx;
 	GetSystemInfo(&gSystemInfo);
-	numberOfConcurrentThread = gSystemInfo.dwNumberOfProcessors / 2;
+	numberOfConcurrentThread = (gSystemInfo.dwNumberOfProcessors / 2);
 	hIOCP = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, numberOfConcurrentThread);
 	if (hIOCP == nullptr)
 	{
@@ -172,7 +172,21 @@ bool InitNetworkIOThread(void)
 		return false;
 	}
 	
-	numberOfCreateIOCPWorkerThread = numberOfConcurrentThread - 1;
+	if (gSystemInfo.dwNumberOfProcessors > 5)
+	{
+		numberOfCreateIOCPWorkerThread = numberOfConcurrentThread + 1;
+	}
+	else if (gSystemInfo.dwNumberOfProcessors > 1)
+	{
+		numberOfCreateIOCPWorkerThread = gSystemInfo.dwNumberOfProcessors - 1;
+	}
+	else
+	{
+		_Log(dfLOG_LEVEL_SYSTEM, "현재 서버의 논리코어가 1개만 존재합니다. 시스템 구동이 불가능 합니다.");
+		CloseHandle(hIOCP);
+		return false;
+	}
+
 	hThreadIOCPWorker = new HANDLE[numberOfCreateIOCPWorkerThread];
 	for (idx = 0; idx < numberOfCreateIOCPWorkerThread; ++idx)
 	{

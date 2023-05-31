@@ -6,7 +6,8 @@
 #include <process.h>
 #include "RingBuffer.h"
 #include "SerializationBuffer.h"
-#include <map>
+//#include <map>
+#include <unordered_map>
 #include <locale.h>
 
 #define EXIT_THREAD_CODE	
@@ -52,7 +53,7 @@ DWORD numberOfCreateIOCPWorkerThread;
 HANDLE hIOCP;
 HANDLE hThreadAccept;
 HANDLE* hThreadIOCPWorker;
-std::map<SESSIONID, Session*> sessionMap;
+std::unordered_map<SESSIONID, Session*> sessionMap;
 SRWLOCK	srwlock = RTL_SRWLOCK_INIT;
 static void (*OnRecv)(SESSIONID sessionID, SerializationBuffer& packet) = nullptr;
 
@@ -60,7 +61,7 @@ void ReleaseServerResource()
 {
 	_Log(dfLOG_LEVEL_SYSTEM, "서버 리소스 해제 시작");
 	Session* ptrSession;
-	std::map<SESSIONID, Session*>::iterator iter = sessionMap.begin();
+	std::unordered_map<SESSIONID, Session*>::iterator iter = sessionMap.begin();
 	while (iter != sessionMap.end())
 	{
 		ptrSession = iter->second;
